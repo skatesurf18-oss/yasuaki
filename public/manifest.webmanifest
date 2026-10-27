@@ -1,0 +1,9 @@
+{
+  "name": "関東燃料 業務日報",
+  "short_name": "業務日報",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f4f6",
+  "theme_color": "#1e3a8a",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

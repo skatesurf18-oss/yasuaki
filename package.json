@@ -1,0 +1,14 @@
+{
+  "name": "kanto-nenryo-nippo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "関東燃料 社内専用 業務日報アプリ",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "test": "node --no-warnings --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
