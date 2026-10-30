@@ -75,10 +75,10 @@ function createApp({ dataDir }) {
   // ---------- 日報データの組み立て ----------
   const stmt = {
     user: q('SELECT id, name, color FROM users WHERE id = ?'),
-    kpi: q(`SELECT e.item_id, e.actual, i.name, i.unit FROM kpi_entries e JOIN kpi_items i ON i.id = e.item_id
+    kpi: q(`SELECT e.item_id, e.actual, e.amount, e.note, i.name, i.unit FROM kpi_entries e JOIN kpi_items i ON i.id = e.item_id
             WHERE e.report_id = ? ORDER BY i.sort, i.id`),
     target: q('SELECT target FROM kpi_targets WHERE user_id = ? AND item_id = ? AND month = ?'),
-    cumulative: q(`SELECT COALESCE(SUM(e.actual), 0) AS total FROM kpi_entries e JOIN reports r ON r.id = e.report_id
+    cumulative: q(`SELECT COALESCE(SUM(e.actual), 0) AS total, COALESCE(SUM(e.amount), 0) AS amount FROM kpi_entries e JOIN reports r ON r.id = e.report_id
                    WHERE r.user_id = ? AND e.item_id = ? AND r.report_date >= ? AND r.report_date <= ?`),
     attachments: q('SELECT id, filename FROM attachments WHERE report_id = ? ORDER BY id'),
     readers: q(`SELECT u.id, u.name, u.color FROM reads x JOIN users u ON u.id = x.user_id
@@ -94,12 +94,14 @@ function createApp({ dataDir }) {
     const kpi = stmt.kpi.all(r.id).map((k) => {
       const t = stmt.target.get(r.user_id, k.item_id, month);
       const target = t ? t.target : 0;
-      const cumulative = stmt.cumulative.get(r.user_id, k.item_id, `${month}-01`, r.report_date).total;
+      const cum = stmt.cumulative.get(r.user_id, k.item_id, `${month}-01`, r.report_date);
+      const cumulative = cum.total;
       return {
         item_id: k.item_id, name: k.name, unit: k.unit, actual: k.actual, target, cumulative,
+        amount: k.amount, cumulative_amount: cum.amount, note: k.note,
         rate: target > 0 ? Math.round((cumulative / target) * 1000) / 10 : null,
       };
-    }).filter((k) => k.actual || k.target || k.cumulative); // すべて0の項目は表示しない
+    }).filter((k) => k.actual || k.target || k.cumulative || k.amount || k.note); // 空の項目は表示しない
     const reactions = {};
     for (const x of stmt.reactions.all(r.id)) {
       const g = (reactions[x.kind] ||= { kind: x.kind, count: 0, mine: false, users: [] });
@@ -173,12 +175,18 @@ function createApp({ dataDir }) {
   function saveKpi(reportId, kpi) {
     if (!kpi || typeof kpi !== 'object') return;
     q('DELETE FROM kpi_entries WHERE report_id = ?').run(reportId);
-    const ins = q('INSERT INTO kpi_entries (report_id, item_id, actual) VALUES (?, ?, ?)');
+    const ins = q('INSERT INTO kpi_entries (report_id, item_id, actual, amount, note) VALUES (?, ?, ?, ?, ?)');
     for (const [itemId, val] of Object.entries(kpi)) {
       if (!q('SELECT 1 FROM kpi_items WHERE id = ?').get(Number(itemId))) continue;
-      const n = Number(val);
-      if (!Number.isFinite(n) || n < 0 || n > 1e9) throw new HttpError(400, 'KPI実績は0以上の数値で入力してください');
-      ins.run(reportId, Number(itemId), n);
+      // 数値だけ（件数）でも、{ actual, amount, note } でも受け付ける
+      const v = val !== null && typeof val === 'object' ? val : { actual: val };
+      const n = Number(v.actual || 0);
+      const amount = Number(v.amount || 0);
+      const note = v.note == null ? '' : String(v.note).replace(/\r\n/g, '\n').trim();
+      if (!Number.isFinite(n) || n < 0 || n > 1e9) throw new HttpError(400, 'KPIの件数は0以上の数値で入力してください');
+      if (!Number.isFinite(amount) || amount < 0 || amount > 1e12) throw new HttpError(400, 'KPIの金額は0以上の数値で入力してください');
+      if (note.length > 2000) throw new HttpError(400, 'KPIの内容は2000文字までです');
+      ins.run(reportId, Number(itemId), n, amount, note);
     }
   }
 
@@ -244,6 +252,28 @@ function createApp({ dataDir }) {
     if (!verifyPassword(String(body.current || ''), u.password_hash)) throw new HttpError(400, '現在のパスワードが違います');
     if (String(body.next || '').length < 6) throw new HttpError(400, '新しいパスワードは6文字以上にしてください');
     q('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.next)), me.id);
+    return { ok: true };
+  });
+
+  // 会社名・ロゴ（ログイン前の画面でも使うため認証不要）
+  const getSetting = (k) => { const row = q('SELECT value FROM settings WHERE key = ?').get(k); return row ? row.value : null; };
+  route('GET', '/api/settings', () => ({ company_name: getSetting('company_name') || '関東燃料', logo: getSetting('logo') }), { auth: false });
+
+  route('PUT', '/api/admin/settings', ({ me, body }) => {
+    requireAdmin(me);
+    const set = q('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value');
+    if (body.company_name != null) {
+      const name = String(body.company_name).trim();
+      if (!name || name.length > 40) throw new HttpError(400, '会社名は1〜40文字で入力してください');
+      set.run('company_name', name);
+    }
+    if (body.logo === null) q("DELETE FROM settings WHERE key = 'logo'").run();
+    else if (body.logo != null) {
+      const logo = String(body.logo);
+      if (!/^data:image\/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(logo)) throw new HttpError(400, 'ロゴは PNG / JPEG / WebP / SVG の画像にしてください');
+      if (logo.length > 700_000) throw new HttpError(400, 'ロゴ画像が大きすぎます（500KBまで）');
+      set.run('logo', logo);
+    }
     return { ok: true };
   });
 
@@ -316,13 +346,13 @@ function createApp({ dataDir }) {
     const items = q('SELECT id, name FROM kpi_items ORDER BY sort, id').all();
     const rows = q(`SELECT r.*, u.name AS user_name FROM reports r JOIN users u ON u.id = r.user_id
                     WHERE substr(r.report_date, 1, 7) = ? ORDER BY r.report_date, u.id`).all(query.month);
-    const entry = q('SELECT actual FROM kpi_entries WHERE report_id = ? AND item_id = ?');
+    const entry = q('SELECT actual, amount, note FROM kpi_entries WHERE report_id = ? AND item_id = ?');
     const out = [['日付', '氏名', '今日やるべきこと', '今日やったこと・結果', 'よかったこと・改善点→改善策',
       '共有・連絡事項', '相談したいこと', '翌出社日への決意・目標', '翌出社日のスケジュール',
-      '出社時刻', '退社時刻', '休憩時間', ...items.map((i) => i.name)]];
+      '出社時刻', '退社時刻', '休憩時間', ...items.flatMap((i) => [`${i.name} 件数`, `${i.name} 金額(円)`, `${i.name} 内容`])]];
     for (const r of rows) {
       out.push([r.report_date, r.user_name, ...TEXT_FIELDS.map((f) => r[f]), ...TIME_FIELDS.map((f) => r[f]),
-        ...items.map((i) => { const e = entry.get(r.id, i.id); return e ? e.actual : ''; })]);
+        ...items.flatMap((i) => { const e = entry.get(r.id, i.id); return e ? [e.actual, e.amount, e.note] : ['', '', '']; })]);
     }
     return { csv: csv(out), filename: `nippo_${query.month}.csv` };
   });
@@ -448,30 +478,33 @@ function createApp({ dataDir }) {
     if (!isMonth(query.month)) throw new HttpError(400, '月を指定してください');
     const items = q('SELECT id, name, unit FROM kpi_items WHERE active = 1 ORDER BY sort, id').all();
     const users = q('SELECT id, name, color FROM users WHERE active = 1 ORDER BY id').all();
-    const totals = q(`SELECT r.user_id, e.item_id, SUM(e.actual) AS total FROM kpi_entries e
+    const totals = q(`SELECT r.user_id, e.item_id, SUM(e.actual) AS total, SUM(e.amount) AS amount FROM kpi_entries e
                       JOIN reports r ON r.id = e.report_id WHERE substr(r.report_date, 1, 7) = ?
                       GROUP BY r.user_id, e.item_id`).all(query.month);
     const targets = q('SELECT user_id, item_id, target FROM kpi_targets WHERE month = ?').all(query.month);
     const key = (u, i) => `${u}:${i}`;
     const tMap = new Map(targets.map((t) => [key(t.user_id, t.item_id), t.target]));
     const aMap = new Map(totals.map((t) => [key(t.user_id, t.item_id), t.total]));
+    const mMap = new Map(totals.map((t) => [key(t.user_id, t.item_id), t.amount]));
     const rows = users.map((u) => ({
       user: u,
       cells: items.map((i) => {
         const target = tMap.get(key(u.id, i.id)) || 0;
         const actual = aMap.get(key(u.id, i.id)) || 0;
-        return { item_id: i.id, target, actual, rate: target > 0 ? Math.round((actual / target) * 1000) / 10 : null };
+        const amount = mMap.get(key(u.id, i.id)) || 0;
+        return { item_id: i.id, target, actual, amount, rate: target > 0 ? Math.round((actual / target) * 1000) / 10 : null };
       }),
     }));
     const total = items.map((i, idx) => {
       const target = rows.reduce((s, r) => s + r.cells[idx].target, 0);
       const actual = rows.reduce((s, r) => s + r.cells[idx].actual, 0);
-      return { item_id: i.id, target, actual, rate: target > 0 ? Math.round((actual / target) * 1000) / 10 : null };
+      const amount = rows.reduce((s, r) => s + r.cells[idx].amount, 0);
+      return { item_id: i.id, target, actual, amount, rate: target > 0 ? Math.round((actual / target) * 1000) / 10 : null };
     });
     if (query.format === 'csv') {
-      const out = [['氏名', ...items.flatMap((i) => [`${i.name} 目標`, `${i.name} 実績`, `${i.name} 達成率(%)`])]];
-      for (const r of rows) out.push([r.user.name, ...r.cells.flatMap((c) => [c.target, c.actual, c.rate ?? '-'])]);
-      out.push(['合計', ...total.flatMap((c) => [c.target, c.actual, c.rate ?? '-'])]);
+      const out = [['氏名', ...items.flatMap((i) => [`${i.name} 目標`, `${i.name} 実績`, `${i.name} 達成率(%)`, `${i.name} 金額(円)`])]];
+      for (const r of rows) out.push([r.user.name, ...r.cells.flatMap((c) => [c.target, c.actual, c.rate ?? '-', c.amount])]);
+      out.push(['合計', ...total.flatMap((c) => [c.target, c.actual, c.rate ?? '-', c.amount])]);
       return { csv: csv(out), filename: `kpi_${query.month}.csv` };
     }
     return { month: query.month, items, rows, total };
