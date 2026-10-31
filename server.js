@@ -217,7 +217,9 @@ function createApp({ dataDir }) {
   };
 
   route('POST', '/api/login', ({ req, body }) => {
-    const ip = req.socket.remoteAddress || '';
+    // クラウド（Render など）では全員が同じ中継サーバー経由になるため、中継サーバーが付けた接続元を使う
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const ip = (process.env.TRUST_PROXY === '1' && forwarded.length ? forwarded[forwarded.length - 1] : req.socket.remoteAddress) || '';
     const f = loginFailures.get(ip);
     if (f && f.count >= 10 && Date.now() - f.at < 15 * 60_000) {
       throw new HttpError(429, 'ログインの失敗が続いたため、しばらく時間をおいてお試しください');

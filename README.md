@@ -51,6 +51,20 @@ npm start
 外出先のスマホから使う場合は、HTTPS 対応のサーバー（クラウドの VPS など）に置き、
 `COOKIE_SECURE=1` を設定してください。どちらの方法にするかは、ご相談のうえで決めましょう。
 
+### Render（クラウド）に置く場合
+
+`render.yaml` に設定をまとめてあります。
+
+1. https://render.com に GitHub アカウントでログイン
+2. 「New」→「Blueprint」→ このリポジトリを選び、「Apply」
+3. 支払い情報を登録（Starter プラン ＋ 1GB ディスク）
+4. できあがった `https://〜.onrender.com` を開き、`admin` でログイン
+   （パスワードは Render の「Environment」→ `ADMIN_PASSWORD` に表示されます）
+
+| 変数 | 内容 |
+|---|---|
+| `TRUST_PROXY` | `1` にすると、ログイン失敗の回数制限を中継サーバーが付けた接続元ごとに数えます（Render などで使用） |
+
 ### バックアップ
 
 `data/` フォルダ（`nippo.db` と `uploads/`）をまるごとコピーすれば保存できます。

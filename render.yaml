@@ -1,0 +1,26 @@
+# Render（クラウドサーバー）の設定ファイル
+# Render の画面で「New → Blueprint」からこのリポジトリを選ぶと、この内容でサーバーが作られます。
+services:
+  - type: web
+    name: kanto-nippo
+    runtime: node
+    plan: starter            # 常時起動のプラン（無料プランはデータを保存できないため使えません）
+    region: singapore        # 日本から一番近い地域
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data     # 日報・写真の保存先（下のディスク）
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: ADMIN_PASSWORD
+        generateValue: true  # 管理者の初期パスワードを自動で作成（Render の Environment 画面で確認できます）
+    disk:
+      name: nippo-data
+      mountPath: /var/data
+      sizeGB: 1
