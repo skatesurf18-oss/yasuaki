@@ -78,13 +78,16 @@ test('日報の一連の流れ', async () => {
   assert.equal(draft.clock_in, '07:30');
   assert.equal((await a('GET', '/api/reports/draft?date=2026-10-27')).data.existing_id, r1.data.id);
 
-  const r2 = await a('POST', '/api/reports', { report_date: '2026-10-28', todo: draft.todo, kpi: { [reform]: 2 } });
+  const r2 = await a('POST', '/api/reports', { report_date: '2026-10-28', todo: draft.todo,
+    kpi: { [reform]: { actual: 2, amount: 850000, note: '高橋様 浴室リフォーム\n中村様 キッチン' } } });
   assert.equal(r2.status, 200);
 
   // 累計・達成率
   const detail = (await b('GET', `/api/reports/${r2.data.id}`)).data;
   const k = detail.kpi.find((x) => x.item_id === reform);
   assert.deepEqual([k.actual, k.cumulative, k.target, k.rate], [2, 3, 4, 75]);
+  assert.deepEqual([k.amount, k.cumulative_amount, k.note], [850000, 850000, '高橋様 浴室リフォーム\n中村様 キッチン']);
+  assert.equal((await a('PUT', `/api/reports/${r2.data.id}`, { kpi: { [reform]: { actual: 1, amount: -5 } } })).status, 400);
   assert.equal(detail.is_read, false);
   assert.equal(detail.can_edit, false);
 
@@ -125,8 +128,21 @@ test('日報の一連の流れ', async () => {
   const sum = (await b('GET', '/api/kpi/summary?month=2026-10')).data;
   const row = sum.rows.find((r) => r.user.name === '古澤 泰明');
   assert.equal(row.cells.find((c) => c.item_id === reform).actual, 3);
+  assert.equal(row.cells.find((c) => c.item_id === reform).amount, 850000);
   const csv = await b('GET', '/api/reports/export?month=2026-10');
   assert.match(csv.data, /古澤 泰明/);
+  assert.match(csv.data, /高橋様 浴室リフォーム/);
+
+  // 会社ロゴ・会社名（ログイン前でも取得できる。変更は管理者のみ）
+  assert.equal((await fetch(base + '/api/settings').then((r) => r.json())).company_name, '関東燃料');
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  assert.equal((await b('PUT', '/api/admin/settings', { logo: PNG })).status, 403);
+  assert.equal((await admin('PUT', '/api/admin/settings', { logo: 'data:text/html;base64,PHNjcmlwdD4=' })).status, 400);
+  assert.equal((await admin('PUT', '/api/admin/settings', { company_name: '関東燃料株式会社', logo: PNG })).status, 200);
+  const st = await fetch(base + '/api/settings').then((r) => r.json());
+  assert.deepEqual([st.company_name, st.logo], ['関東燃料株式会社', PNG]);
+  await admin('PUT', '/api/admin/settings', { logo: null });
+  assert.equal((await fetch(base + '/api/settings').then((r) => r.json())).logo, null);
 
   // 管理者以外は管理APIを使えない
   assert.equal((await b('GET', '/api/admin/users')).status, 403);

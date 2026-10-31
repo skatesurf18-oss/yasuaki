@@ -14,6 +14,7 @@ const TIMES = [['clock_in', '出社時刻'], ['clock_out', '退社時刻'], ['br
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
 
 const state = {
+  brand: { company_name: '関東燃料', logo: null },
   me: null, today: '', stamps: [], users: [], items: [],
   unread: { reports: 0, notifications: 0 },
   filter: { user_id: '', q: '', unread: false },
@@ -57,6 +58,7 @@ function fmtTs(s) {
   const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return ymd === state.today ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
+function fmtYen(n) { return '¥' + Math.round(Number(n) || 0).toLocaleString('ja-JP'); }
 function fmtNum(n) { return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100); }
 function monthOf(d) { return d.slice(0, 7); }
 function shiftMonth(m, delta) {
@@ -72,13 +74,24 @@ function store(key, val) {
   return null;
 }
 
+// ---------- 会社ロゴ ----------
+const DEFAULT_EMBLEM = `<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#0f2a52"/><path d="M32 9c3 9 15 16 15 30 0 10-7 17-15 17s-15-7-15-17c0-8 5-13 8-18 1 6 3 9 6 10-1-9 0-15 1-22z" fill="#f26b1d"/><path d="M32 33c2 4 7 7 7 13 0 4-3 7-7 7s-7-3-7-7c0-4 2-6 4-8 1 2 1 3 3 4-1-3 0-6 0-9z" fill="#ffd27a"/></svg>`;
+function logoHtml(cls = '') {
+  const b = state.brand;
+  return b.logo ? `<img class="logo ${cls}" src="${esc(b.logo)}" alt="${esc(b.company_name)}">` : `<span class="logo ${cls}">${DEFAULT_EMBLEM}</span>`;
+}
+async function loadBrand() {
+  try { state.brand = await api('GET', '/api/settings'); } catch { /* 既定のロゴを使う */ }
+}
+
 // ---------- 画面の枠 ----------
 function shell(title, content, { back = false, active = '' } = {}) {
   const b = state.unread;
   $('#app').innerHTML = `
     <header class="topbar">
       ${back ? '<button class="icon-btn" data-act="back" aria-label="戻る">←</button>' : ''}
-      <h1><span class="brand">関東燃料</span>${esc(title)}</h1>
+      ${back ? '' : logoHtml('sm')}
+      <h1><span class="brand">${esc(state.brand.company_name)}<em>KANTO NENRYO</em></span>${esc(title)}</h1>
       ${active === 'home' ? '<button class="icon-btn" data-act="toggle-search" aria-label="検索">🔍</button>' : ''}
     </header>
     <main id="main">${content}</main>
@@ -128,6 +141,8 @@ function reportCard(r, { full = false } = {}) {
           <div><small>達成率</small><b>${k.rate == null ? '-' : k.rate.toFixed(1)}</b><span class="unit">%</span></div>
         </div>
         <div class="rate-bar"><i style="width:${Math.min(k.rate || 0, 100)}%"></i></div>
+        ${k.amount || k.cumulative_amount ? `<div class="kpi-money"><span>金額 <b>${fmtYen(k.amount)}</b></span><span class="muted">月累計 ${fmtYen(k.cumulative_amount)}</span></div>` : ''}
+        ${k.note ? `<p class="kpi-note">${esc(k.note)}</p>` : ''}
       </div>`).join('')}</div>` : '';
   const photos = r.attachments.length ? `<div class="photos ${r.attachments.length === 1 ? 'one' : ''}">
       ${r.attachments.map((a) => `<img src="${esc(a.url)}" alt="添付写真" loading="lazy" data-act="view-photo">`).join('')}</div>` : '';
@@ -372,8 +387,9 @@ async function viewForm(editId, params) {
     const t = await api('GET', `/api/kpi/targets?month=${monthOf(r.report_date)}&user_id=${ownerId}`);
     targets = Object.fromEntries(t.items.map((i) => [i.id, i.target]));
   } catch { /* 目標なし */ }
-  const kpiVal = Object.fromEntries((r.kpi || []).map((k) => [k.item_id, k.actual]));
-  if (r.kpi_values) Object.assign(kpiVal, r.kpi_values);
+  const kpiVal = Object.fromEntries((r.kpi || []).map((k) => [k.item_id, { actual: k.actual, amount: k.amount, note: k.note }]));
+  for (const [id, v] of Object.entries(r.kpi_values || {})) kpiVal[id] = v !== null && typeof v === 'object' ? v : { actual: v };
+  const kv = (id) => ({ actual: 0, amount: 0, note: '', ...(kpiVal[id] || {}) });
   const newImages = [];
   const removeIds = [];
 
@@ -389,16 +405,25 @@ async function viewForm(editId, params) {
         ${TIMES.map(([k, l]) => `<div class="field"><label for="${k}">${l}</label><input type="time" id="${k}" value="${esc(r[k] || '')}"></div>`).join('')}
       </div>
       <div class="field">
-        <label>KPI（本日の実績）<span class="hint">月目標は「KPI」→「目標設定」から</span></label>
-        ${state.items.map((i) => `
-          <div class="kpi-input">
-            <div class="nm">${esc(i.name)}<small>月目標 ${fmtNum(targets[i.id] || 0)}${esc(i.unit)}</small></div>
-            <div class="stepper">
-              <button type="button" data-step="-1" data-item="${i.id}" aria-label="減らす">−</button>
-              <input type="number" inputmode="decimal" min="0" step="any" data-kpi="${i.id}" value="${fmtNum(kpiVal[i.id] || 0)}" aria-label="${esc(i.name)}">
-              <button type="button" data-step="1" data-item="${i.id}" aria-label="増やす">＋</button>
+        <label>KPI（本日の実績）<span class="hint">件数を入れると内容・金額の欄が開きます</span></label>
+        ${state.items.map((i) => { const v = kv(i.id); const open = v.actual || v.amount || v.note; return `
+          <div class="kpi-input-wrap">
+            <div class="kpi-input">
+              <div class="nm">${esc(i.name)}<small>月目標 ${fmtNum(targets[i.id] || 0)}${esc(i.unit)}</small>
+                <button type="button" class="link-btn" data-detail="${i.id}" aria-expanded="${open ? 'true' : 'false'}">${open ? '▲ 内容・金額を閉じる' : '▼ 内容・金額を入力'}</button></div>
+              <div class="stepper">
+                <button type="button" data-step="-1" data-item="${i.id}" aria-label="減らす">−</button>
+                <input type="number" inputmode="decimal" min="0" step="any" data-kpi="${i.id}" value="${fmtNum(v.actual)}" aria-label="${esc(i.name)} 件数">
+                <button type="button" data-step="1" data-item="${i.id}" aria-label="増やす">＋</button>
+              </div>
             </div>
-          </div>`).join('')}
+            <div class="kpi-detail" id="kpi-detail-${i.id}" ${open ? '' : 'hidden'}>
+              <div class="money-input"><label for="kpi-amount-${i.id}">金額</label>
+                <input type="text" inputmode="numeric" id="kpi-amount-${i.id}" data-amount="${i.id}" value="${v.amount ? Math.round(v.amount).toLocaleString('ja-JP') : ''}" placeholder="0"><span>円</span></div>
+              <label for="kpi-note-${i.id}" class="sr">内容</label>
+              <textarea id="kpi-note-${i.id}" data-note="${i.id}" rows="2" placeholder="内容（例：高橋様 エコキュート交換 370L）">${esc(v.note)}</textarea>
+            </div>
+          </div>`; }).join('')}
       </div>
       <div class="field">
         <label>写真<span class="hint">最大10枚・自動で縮小して送信します</span></label>
@@ -415,7 +440,14 @@ async function viewForm(editId, params) {
   function collect() {
     const data = { report_date: $('#report_date').value, kpi: {} };
     for (const [k] of [...SECTIONS, ...TIMES]) data[k] = $(`#${k}`).value;
-    for (const inp of $$('[data-kpi]')) data.kpi[inp.dataset.kpi] = Number(inp.value) || 0;
+    for (const inp of $$('[data-kpi]')) {
+      const id = inp.dataset.kpi;
+      data.kpi[id] = {
+        actual: Number(inp.value) || 0,
+        amount: Number($(`[data-amount="${id}"]`).value.replace(/[^\d.]/g, '')) || 0,
+        note: $(`[data-note="${id}"]`).value,
+      };
+    }
     return data;
   }
   if (!editId) {
@@ -428,7 +460,21 @@ async function viewForm(editId, params) {
     const inp = $(`[data-kpi="${b.dataset.item}"]`);
     inp.value = Math.max(0, (Number(inp.value) || 0) + Number(b.dataset.step));
     inp.dispatchEvent(new Event('input', { bubbles: true }));
+    if (Number(inp.value) > 0) toggleDetail(b.dataset.item, true);
   });
+  function toggleDetail(id, open) {
+    const box = $(`#kpi-detail-${id}`);
+    const btn = $(`[data-detail="${id}"]`);
+    box.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+    btn.textContent = open ? '▲ 内容・金額を閉じる' : '▼ 内容・金額を入力';
+  }
+  $$('[data-detail]').forEach((b) => b.onclick = () => toggleDetail(b.dataset.detail, $(`#kpi-detail-${b.dataset.detail}`).hidden));
+  // 金額は入力後に「1,234,000」のように桁区切りで表示する
+  $$('[data-amount]').forEach((inp) => inp.addEventListener('blur', () => {
+    const n = Number(inp.value.replace(/[^\d.]/g, ''));
+    inp.value = n ? Math.round(n).toLocaleString('ja-JP') : '';
+  }));
 
   function drawThumbs() {
     const existing = r.attachments.filter((a) => !removeIds.includes(a.id));
@@ -493,14 +539,15 @@ async function viewKpi(params) {
     const s = await api('GET', `/api/kpi/summary?month=${month}`);
     const [y, m] = month.split('-').map(Number);
     const cell = (c) => `<td>${fmtNum(c.actual)} / ${fmtNum(c.target)}<br>
-      <span class="${c.rate == null ? 'muted' : c.rate >= 100 ? 'rate-good' : c.rate < 50 ? 'rate-low' : ''}">${c.rate == null ? '-' : c.rate.toFixed(1)}%</span></td>`;
+      <span class="${c.rate == null ? 'muted' : c.rate >= 100 ? 'rate-good' : c.rate < 50 ? 'rate-low' : ''}">${c.rate == null ? '-' : c.rate.toFixed(1)}%</span>
+      ${c.amount ? `<br><small class="money">${fmtYen(c.amount)}</small>` : ''}</td>`;
     main.innerHTML = `
       <div class="month-nav">
         <a class="btn" href="#/kpi?month=${shiftMonth(month, -1)}">◀ 前月</a>
         <strong>${y}年${m}月</strong>
         <a class="btn" href="#/kpi?month=${shiftMonth(month, 1)}">翌月 ▶</a>
       </div>
-      <p class="muted" style="font-size:13px;margin:0 4px 8px">各セル：実績 / 月目標（達成率）</p>
+      <p class="muted" style="font-size:13px;margin:0 4px 8px">各セル：実績 / 月目標・達成率・金額</p>
       <div class="table-wrap"><table>
         <thead><tr><th>氏名</th>${s.items.map((i) => `<th>${esc(i.name)}</th>`).join('')}</tr></thead>
         <tbody>${s.rows.map((r) => `<tr><td>${esc(r.user.name)}</td>${r.cells.map(cell).join('')}</tr>`).join('')}</tbody>
@@ -592,6 +639,18 @@ async function viewAdmin() {
   catch (err) { main.innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
   const colorOpts = (sel) => COLORS.map((c) => `<option value="${c}" style="background:${c};color:#fff" ${c === sel ? 'selected' : ''}>${c}</option>`).join('');
   main.innerHTML = `
+    <div class="section-title">会社ロゴ・会社名</div>
+    <form class="form" id="brand-form">
+      <div class="brand-preview" id="brand-preview">${logoHtml('lg')}</div>
+      <div class="field"><label for="brand-name">会社名（画面上部に表示）</label>
+        <input type="text" id="brand-name" maxlength="40" value="${esc(state.brand.company_name)}" required></div>
+      <div class="field"><label for="brand-logo">ロゴ画像<span class="hint">PNG・JPEG・SVG（正方形に近いものがきれいに表示されます）</span></label>
+        <input type="file" id="brand-logo" accept="image/png,image/jpeg,image/webp,image/svg+xml"></div>
+      <div class="btns">
+        <button type="button" class="btn" id="brand-reset">標準のマークに戻す</button>
+        <button type="submit" class="btn primary">保存する</button>
+      </div>
+    </form>
     <div class="section-title">社員（${users.filter((u) => u.active).length}名が利用中）</div>
     <div class="list">${users.map((u) => `
       <details class="list-item" style="display:block">
@@ -641,6 +700,28 @@ async function viewAdmin() {
       <button class="btn primary block" type="submit">追加する</button>
     </form>`;
 
+  let newLogo; // undefined: 変更なし / null: 標準に戻す / 文字列: 新しいロゴ
+  const preview = () => {
+    const keep = state.brand.logo;
+    if (newLogo !== undefined) state.brand.logo = newLogo;
+    $('#brand-preview').innerHTML = logoHtml('lg');
+    state.brand.logo = keep;
+  };
+  $('#brand-logo').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try { newLogo = await readLogo(f); preview(); } catch (err) { toast(err.message); }
+  };
+  $('#brand-reset').onclick = () => { newLogo = null; $('#brand-logo').value = ''; preview(); };
+  $('#brand-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('PUT', '/api/admin/settings', { company_name: $('#brand-name').value, ...(newLogo !== undefined ? { logo: newLogo } : {}) });
+      await loadBrand();
+      toast('会社ロゴ・会社名を保存しました');
+      viewAdmin();
+    } catch (err) { toast(err.message); }
+  };
   const formData = (f) => Object.fromEntries(new FormData(f));
   const done = async (msg) => { toast(msg); await loadMaster(); viewAdmin(); };
   $$('form[data-user]').forEach((f) => f.onsubmit = async (e) => {
@@ -666,11 +747,37 @@ async function viewAdmin() {
   };
 }
 
+// ロゴ画像を読み込む（写真などの大きな画像は 400px に縮小）
+function readLogo(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('ロゴ画像を読み込めませんでした'));
+    reader.onload = () => {
+      const src = String(reader.result);
+      if (file.type === 'image/svg+xml') {
+        if (src.length > 700000) reject(new Error('ロゴ画像が大きすぎます（500KBまで）')); else resolve(src);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 400 / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL('image/png'));
+      };
+      img.onerror = () => reject(new Error('ロゴ画像を読み込めませんでした'));
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 // ---------- ログイン ----------
 function renderLogin() {
   $('#app').innerHTML = `
     <div class="login">
-      <div class="logo"><img src="/icon.svg" alt=""><h1>関東燃料 業務日報</h1><p>社内専用</p></div>
+      <div class="login-brand">${logoHtml('lg')}<h1>${esc(state.brand.company_name)}<span>業務日報</span></h1><p>KANTO NENRYO ・ 社内専用</p></div>
       <form class="form" id="login-form">
         <div class="field"><label for="login_id">ログインID</label><input type="text" id="login_id" autocomplete="username" autocapitalize="off" required></div>
         <div class="field"><label for="password">パスワード</label><input type="password" id="password" autocomplete="current-password" required></div>
@@ -711,6 +818,7 @@ function router() {
 }
 
 async function boot() {
+  await loadBrand();
   try {
     const me = await api('GET', '/api/me');
     state.me = me.user; state.today = me.today; state.stamps = me.stamps;
